@@ -19,6 +19,7 @@ mytheme = function(){
         )
 }
 
+
 datadir = "./"
 figdir = "./"
 
@@ -79,16 +80,25 @@ tmp[, cultivar := factor(
 )]
 
 plot = ggplot(tmp, aes(x = year, y = yield, group = interaction(year, country))) +
-  mytheme() + theme(legend.position = "top") +
+  mytheme() +
+  theme(legend.position = "top") +
   geom_boxplot(aes(fill = country), size = 0.25, outlier.size = .7) +
   facet_wrap(~cultivar, ncol = 1, scales = "free") +
   labs(x = "Year", y = "Yield (hkg/ha)", fill = NULL) +
   scale_x_continuous(breaks = yrs) +
-  scale_fill_npg()
+  scale_fill_viridis_d(option = "C", begin = .25, end = 1)
 
 pdf(paste0(figdir, "yield-year-country-overview.pdf"), height = 6, width = 10)
 print(plot)
 dev.off()
+
+# Convert the pdf to a png to reduce file size
+pdftools::pdf_convert(
+  pdf = paste0(figdir, "/yield-year-country-overview.pdf"),
+  filenames = paste0(figdir, "/yield-year-country-overview.png"),
+  format = "png",
+  dpi = 150
+)
 
 
 # map of trial sites
@@ -164,3 +174,60 @@ pdftools::pdf_convert(
   format = "png",
   dpi = 150
 )
+
+# ==============================================================================
+# Histogram of the number of trials and years per variety
+# ==============================================================================
+
+tmp = rbind(
+  data_b[, .(trial, year, country, variety)][, let(tag = "Spring barley")],
+  data_p[, .(trial, year, country, variety)][, let(tag = "Potato")],
+  data_c[, .(trial, year, country, variety)][, let(tag = "Red clover")]
+)
+
+tmp[, .N, by = c("variety", "tag")][order(N)]
+
+plot1 = tmp[, .N, by = c("variety", "tag")] |>
+  _[, let(N = cut(N, breaks = c(1, 5, 10, 25, 50, 100, 200, 400, Inf), include.lowest = TRUE))] |>
+  ggplot() +
+  geom_bar(aes(x = N)) +
+  scale_x_discrete(
+    labels = c(
+      "1-5", "6-10", "11-25", "26-50", "51-100", "101-200", "201-400", ">400"
+    )
+  ) +
+  labs(x = "Number of field trials", y = "Number of varieties") +
+  facet_wrap(~tag, scales = "free_y", ncol = 1) +
+  theme_light() +
+  theme(
+    strip.text = element_text(colour = "black"),
+    strip.background = element_rect(colour = "#f0f0f0", fill = "#f0f0f0"),
+    text = element_text(size = 15)
+  )
+
+plot2 = tmp[, .(N = length(unique(year))), by = c("variety", "tag")] |>
+  _[, let(N = cut(N, breaks = c(1, 1.1, 2, 3, 5, 7, 10, 15, 20, Inf), include.lowest = TRUE))] |>
+  ggplot() +
+  geom_bar(aes(x = N)) +
+  scale_x_discrete(
+    labels = c(
+      "1", "2", "3", "4-5", "6-7", "8-10", "11-15", "16-20", ">20"
+    )
+  ) +
+  labs(x = "Number of years", y = "Number of varieties") +
+  facet_wrap(~tag, scales = "free_y", ncol = 1) +
+  theme_light() +
+  theme(
+    strip.text = element_text(colour = "black"),
+    strip.background = element_rect(colour = "#f0f0f0", fill = "#f0f0f0"),
+    text = element_text(size = 15)
+  )
+
+pdf(
+  paste0(figdir, "n_trials.pdf"),
+  width = 8,
+  height = 8
+)
+print(plot1)
+print(plot2)
+dev.off()

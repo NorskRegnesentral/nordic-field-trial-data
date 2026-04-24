@@ -23,6 +23,9 @@ mytheme = function(){
 datadir = "./"
 figdir = "./"
 
+datadir = "/nr/project/stat/NordForsk_FoodBalSec/Data/DataverseFolder/"
+figdir = "/nr/project/stat/NordForsk_FoodBalSec/results/figures/"
+
 data_b = data.table::fread(paste0(datadir, "/01_barley/01_BarleyData.csv"))
 data_c = data.table::fread(paste0(datadir, "/02_redclover/02_RedCloverData.csv"))
 data_p = data.table::fread(paste0(datadir, "/03_potato/03_PotatoData.csv"))
@@ -230,4 +233,176 @@ pdf(
 )
 print(plot1)
 print(plot2)
+dev.off()
+
+# ==============================================================================
+# Connectivity plots
+# ==============================================================================
+
+tmp = rbind(
+  data_b[, .(trial, year, country, variety)][, let(tag = "Spring barley")],
+  data_p[, .(trial, year, country, variety)][, let(tag = "Potato")],
+  data_c[, .(trial, year, country, variety)][, let(tag = "Red clover")]
+)
+
+# Restrict to the 50 most-tested varieties per crop (by number of unique trials)
+top_varieties = tmp[, .(n_trials = uniqueN(trial)), by = .(tag, variety)] |>
+  _[order(tag, -n_trials)] |>
+  _[, head(.SD, 50), by = tag]
+
+tmp_top = tmp[top_varieties[, .(tag, variety)], on = c("tag", "variety"), nomatch = 0]
+
+# Helper: number of shared trials between all pairs of varieties.
+# C[i,j] = number of trials in which both variety i and variety j appear.
+# Diagonal is set to NA (self-pairing is uninformative).
+compute_cooccurrence = function(dt, var_order) {
+  dt_u = unique(dt[variety %in% var_order, .(variety, trial)])
+  M = dcast(dt_u, variety ~ trial, fun.aggregate = length, fill = 0L)
+  vars = M[[1]]
+  M = as.matrix(M[, -1, with = FALSE])
+  rownames(M) = vars
+  missing_vars = var_order[!var_order %in% rownames(M)]
+  if (length(missing_vars) > 0) {
+    tmp = matrix(0, nrow = length(missing_vars), ncol = ncol(M))
+    colnames(tmp) = colnames(M)
+    rownames(tmp) = missing_vars
+    M = rbind(M, tmp)
+  }
+  M = M[var_order, , drop = FALSE]
+  C = tcrossprod(M)
+  n = nrow(C)
+  vn = rownames(C)
+  out = data.table(
+    var1 = factor(rep(vn, times = n), levels = rev(vn)),
+    var2 = factor(rep(vn, each = n), levels = vn),
+    n_trials = as.vector(C)
+  )
+  out[n_trials == 0, let(n_trials = NA)]
+  out
+}
+
+make_cooccurrence_plot = function(cooc, title) {
+  ggplot(cooc, aes(x = var2, y = var1, fill = n_trials)) +
+    geom_tile(na.rm = TRUE) +
+    scale_fill_viridis_c(
+      "Shared\ntrials",
+      option = "C", begin = 0.1, end = 0.9, na.value = NA,
+      trans = "log",
+      breaks = 2^seq(0, 20, by = 2)
+    ) +
+    labs(title = title, x = NULL, y = NULL) +
+    theme_minimal(base_size = 8) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+      axis.text.y = element_text(size = 6),
+      panel.grid = element_blank(),
+      plot.title = element_text(size = 10, face = "bold")
+    )
+}
+
+crops = c("Spring barley", "Potato", "Red clover")
+
+# ---- Plot 1: global top-50 per crop (50 × 50, one page per crop) ----
+plots_global = lapply(crops, \(crop) {
+  var_order = top_varieties[tag == crop][order(-n_trials), variety]
+  cooc = compute_cooccurrence(tmp_top[tag == crop], var_order)
+  make_cooccurrence_plot(cooc, crop)
+})
+
+pdf(paste0(figdir, "connectivity_global.pdf"), width = 10, height = 9)
+invisible(lapply(plots_global, print))
+dev.off()
+
+# ---- Plot 2: top-50 per country per crop (one page per crop × country) ----
+# Varieties and co-occurrences are computed within each country's trials only.
+plots = list()
+for (crop in crops) {
+  #var_order = top_varieties[tag == crop][order(-n_trials), variety]
+  countries = tmp[tag == crop, sort(unique(country))]
+  for (ctry in countries) {
+    dt = tmp[tag == crop & country == ctry]
+    if (nrow(dt) == 0) next
+    var_order = dt[, .N, by = "variety"][order(-N)][1:25, variety]
+    var_order = var_order[!is.na(var_order)]
+    cooc = compute_cooccurrence(dt, var_order)
+    plots[[length(plots) + 1]] = make_cooccurrence_plot(cooc, paste0(crop, " \u2013 ", ctry))
+  }
+}
+
+pdf(paste0(figdir, "connectivity_by_country.pdf"), width = 10, height = 9)
+invisible(lapply(plots, print))
+dev.off()
+
+# ==============================================================================
+# Connectivity gain from combining countries
+# For the global top-50 varieties per crop, compute two metrics for each
+# country individually and for all countries combined:
+#   (1) % of variety pairs sharing ≥1 trial  (breadth of connectivity)
+#   (2) mean shared trials among connected pairs  (depth of connectivity)
+# ==============================================================================
+conn_gain = lapply(crops, \(crop) {
+  var_order = top_varieties[tag == crop][order(-n_trials), variety]
+  groups = c(tmp[tag == crop, sort(unique(country))], "All countries")
+
+  lapply(groups, \(grp) {
+    dt = if (grp == "All countries") tmp[tag == crop] else
+           tmp[tag == crop & country == grp]
+    cooc = compute_cooccurrence(dt, var_order)
+
+    # Lower triangle only (unique pairs, diagonal already NA)
+    pairs = cooc[as.integer(var1) > as.integer(var2)]
+    data.table(
+      crop = crop,
+      group = grp,
+      pct_connected = pairs[, mean(n_trials > 0, na.rm = TRUE) * 100],
+      mean_shared = pairs[n_trials > 0, mean(n_trials)]
+    )
+  }) |> rbindlist()
+}) |> rbindlist()
+
+# Factor: individual countries alphabetically, "All countries" last
+country_levels = c(sort(unique(conn_gain[group != "All countries", group])), "All countries")
+conn_gain[, group := factor(group, levels = country_levels)]
+conn_gain[, combined := group == "All countries"]
+conn_gain[, crop := factor(crop, levels = c("Spring barley", "Potato", "Red clover"))]
+
+# Plot 1: % of pairs connected
+p_pct = ggplot(conn_gain, aes(x = group, y = pct_connected, fill = combined)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.0f%%", pct_connected)),
+            vjust = -0.4, size = 2.8) +
+  scale_fill_manual(values = c("FALSE" = "#5B90C0", "TRUE" = "#E6842A"),
+                    guide = "none") +
+  scale_y_continuous(limits = c(0, 108), expand = c(0, 0)) +
+  facet_wrap(~crop) +
+  labs(x = NULL, y = "Variety pairs sharing \u22651 trial (%)") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(colour = "black"),
+    strip.background = element_rect(colour = "#f0f0f0", fill = "#f0f0f0"),
+    text = element_text(size = 12)
+  )
+
+# Plot 2: mean shared trials among connected pairs
+p_depth = ggplot(conn_gain, aes(x = group, y = mean_shared, fill = combined)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f", mean_shared)),
+            vjust = -0.4, size = 2.8) +
+  scale_fill_manual(values = c("FALSE" = "#5B90C0", "TRUE" = "#E6842A"),
+                    guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  facet_wrap(~crop) +
+  labs(x = NULL, y = "Mean shared trials (connected pairs)") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(colour = "black"),
+    strip.background = element_rect(colour = "#f0f0f0", fill = "#f0f0f0"),
+    text = element_text(size = 12)
+  )
+
+pdf(paste0(figdir, "connectivity_gain.pdf"), width = 10, height = 5)
+print(p_pct)
+print(p_depth)
 dev.off()

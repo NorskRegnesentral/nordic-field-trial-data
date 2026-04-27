@@ -5,6 +5,7 @@ library(rnaturalearthdata)
 library(sf)
 library(dplyr)
 library(pdftools)
+library(patchwork)
 
 rm(list = ls())
 
@@ -22,9 +23,6 @@ mytheme = function(){
 
 datadir = "./"
 figdir = "./"
-
-datadir = "/nr/project/stat/NordForsk_FoodBalSec/Data/DataverseFolder/"
-figdir = "/nr/project/stat/NordForsk_FoodBalSec/results/figures/"
 
 data_b = data.table::fread(paste0(datadir, "/01_barley/01_BarleyData.csv"))
 data_c = data.table::fread(paste0(datadir, "/02_redclover/02_RedCloverData.csv"))
@@ -244,13 +242,31 @@ tmp = rbind(
   data_p[, .(trial, year, country, variety)][, let(tag = "Potato")],
   data_c[, .(trial, year, country, variety)][, let(tag = "Red clover")]
 )
+tmp[, let(n = .N), by = c("variety", "tag")]
 
-# Restrict to the 50 most-tested varieties per crop (by number of unique trials)
-top_varieties = tmp[, .(n_trials = uniqueN(trial)), by = .(tag, variety)] |>
-  _[order(tag, -n_trials)] |>
-  _[, head(.SD, 50), by = tag]
+country_order = c("Finland", "Sweden", "Norway", "Denmark", "Iceland")
+tmp[, let(country = factor(country, levels = country_order))]
 
-tmp_top = tmp[top_varieties[, .(tag, variety)], on = c("tag", "variety"), nomatch = 0]
+all_varieties = tmp[, .(variety, tag)] |> unique()
+multicountry_varieties = tmp |>
+  _[, .(is_in_multiple = length(unique(country)) > 1), by = c("variety", "tag")] |>
+  _[is_in_multiple == TRUE] |>
+  _[, let(is_in_multiple = NULL)]
+
+one_country_varieties = tmp |>
+  _[, .(is_in_multiple = length(unique(country)) > 1), by = c("variety", "tag")] |>
+  _[is_in_multiple == FALSE] |>
+  _[, let(is_in_multiple = NULL)]
+one_country_varieties = merge(
+  one_country_varieties,
+  unique(tmp[, .(tag, variety, country)]),
+  by = c("tag", "variety")
+)
+one_country_varieties[, let(country = factor(country, levels = country_order))]
+
+tmp_multi = tmp |>
+  _[multicountry_varieties[, .(tag, variety)], on = c("tag", "variety"), nomatch = 0] |>
+  _[order(-n)]
 
 # Helper: number of shared trials between all pairs of varieties.
 # C[i,j] = number of trials in which both variety i and variety j appear.
@@ -281,128 +297,90 @@ compute_cooccurrence = function(dt, var_order) {
   out
 }
 
-make_cooccurrence_plot = function(cooc, title) {
-  ggplot(cooc, aes(x = var2, y = var1, fill = n_trials)) +
-    geom_tile(na.rm = TRUE) +
+crops = c("Spring barley", "Potato", "Red clover")
+
+n_trial_threshold = 30
+plots = list()
+for (crop in crops) {
+  var_order = tmp_multi[tag == crop, unique(variety)]
+  n_multi = length(var_order)
+  var_order = unique(c(
+    var_order,
+    tmp[tag == crop & n > n_trial_threshold][order(country), unique(variety)]
+  ))
+  cooc = compute_cooccurrence(tmp[tag == crop], var_order)
+  #
+  get_one_country = function(vars, crop) {
+    unique_vars = unique(vars)
+    out = rep(NA, length(vars))
+    for (var in unique_vars) {
+      tmp = one_country_varieties[tag == crop][variety == var]
+      if (nrow(tmp) == 1) {
+        out[vars == var] = paste(tmp$country, "only")
+      } else {
+        out[vars == var] = "Multiple countries"
+      }
+    }
+    out = factor(
+      out,
+      levels = c("Multiple countries", paste(country_order, "only"))
+    )
+    out
+  }
+  cooc$country1 = get_one_country(cooc$var1, crop = crop)
+  cooc$country2 = get_one_country(cooc$var2, crop = crop)
+  cooc$country_tiles = cooc$country1
+  cooc[country1 != country2, let(country_tiles = NA)]
+  cooc = cooc[order(var2)]
+  last_cooc_varieties = sapply(
+    X = unique(cooc[!is.na(country_tiles)]$country_tiles),
+    FUN = function(x) {
+      index = max(which(cooc$country_tiles == x))
+      cooc[index, var2]
+    }
+  )
+  line_data = data.frame(value = c(0, as.integer(last_cooc_varieties)))
+  label_data = data.table(
+    name = c("Multiple countries", paste(country_order, "only"))
+  )
+  label_data = label_data[name %in% cooc$country1]
+  label_data$axis_index = (head(line_data$value, -1) + tail(line_data$value, -1)) / 2 + .5
+  label_data$axis_val = unique(cooc$var2)[label_data$axis_index]
+  plots[[crop]] = ggplot() +
+    geom_tile(
+      data = cooc,
+      mapping = aes(x = var2, y = var1, fill = n_trials),
+      na.rm = TRUE
+    ) +
     scale_fill_viridis_c(
       "Shared\ntrials",
       option = "C", begin = 0.1, end = 0.9, na.value = NA,
       trans = "log",
-      breaks = 2^seq(0, 20, by = 2)
+      breaks = 2^seq(0, 20, by = 2),
+      limits = c(1, 480)
     ) +
-    labs(title = title, x = NULL, y = NULL) +
+    geom_vline(data = line_data, aes(xintercept = value + .5), linewidth = .1) +
+    geom_hline(data = line_data, aes(yintercept = max(value) - value + .5), linewidth = .1) +
+    labs(x = NULL, y = NULL, title = crop) +
+    scale_x_discrete(
+      breaks = label_data$axis_val,
+      labels = label_data$name
+    ) +
+    scale_y_discrete(
+      breaks = label_data$axis_val,
+      labels = label_data$name
+    ) +
+    coord_equal() +
     theme_minimal(base_size = 8) +
     theme(
-      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
-      axis.text.y = element_text(size = 6),
+      axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1),
       panel.grid = element_blank(),
+      text = element_text(size = 10),
       plot.title = element_text(size = 10, face = "bold")
     )
 }
+plot = patchwork::wrap_plots(plots, nrow = 2, guides = "collect")
 
-crops = c("Spring barley", "Potato", "Red clover")
-
-# ---- Plot 1: global top-50 per crop (50 × 50, one page per crop) ----
-plots_global = lapply(crops, \(crop) {
-  var_order = top_varieties[tag == crop][order(-n_trials), variety]
-  cooc = compute_cooccurrence(tmp_top[tag == crop], var_order)
-  make_cooccurrence_plot(cooc, crop)
-})
-
-pdf(paste0(figdir, "connectivity_global.pdf"), width = 10, height = 9)
-invisible(lapply(plots_global, print))
-dev.off()
-
-# ---- Plot 2: top-50 per country per crop (one page per crop × country) ----
-# Varieties and co-occurrences are computed within each country's trials only.
-plots = list()
-for (crop in crops) {
-  #var_order = top_varieties[tag == crop][order(-n_trials), variety]
-  countries = tmp[tag == crop, sort(unique(country))]
-  for (ctry in countries) {
-    dt = tmp[tag == crop & country == ctry]
-    if (nrow(dt) == 0) next
-    var_order = dt[, .N, by = "variety"][order(-N)][1:25, variety]
-    var_order = var_order[!is.na(var_order)]
-    cooc = compute_cooccurrence(dt, var_order)
-    plots[[length(plots) + 1]] = make_cooccurrence_plot(cooc, paste0(crop, " \u2013 ", ctry))
-  }
-}
-
-pdf(paste0(figdir, "connectivity_by_country.pdf"), width = 10, height = 9)
-invisible(lapply(plots, print))
-dev.off()
-
-# ==============================================================================
-# Connectivity gain from combining countries
-# For the global top-50 varieties per crop, compute two metrics for each
-# country individually and for all countries combined:
-#   (1) % of variety pairs sharing ≥1 trial  (breadth of connectivity)
-#   (2) mean shared trials among connected pairs  (depth of connectivity)
-# ==============================================================================
-conn_gain = lapply(crops, \(crop) {
-  var_order = top_varieties[tag == crop][order(-n_trials), variety]
-  groups = c(tmp[tag == crop, sort(unique(country))], "All countries")
-
-  lapply(groups, \(grp) {
-    dt = if (grp == "All countries") tmp[tag == crop] else
-           tmp[tag == crop & country == grp]
-    cooc = compute_cooccurrence(dt, var_order)
-
-    # Lower triangle only (unique pairs, diagonal already NA)
-    pairs = cooc[as.integer(var1) > as.integer(var2)]
-    data.table(
-      crop = crop,
-      group = grp,
-      pct_connected = pairs[, mean(n_trials > 0, na.rm = TRUE) * 100],
-      mean_shared = pairs[n_trials > 0, mean(n_trials)]
-    )
-  }) |> rbindlist()
-}) |> rbindlist()
-
-# Factor: individual countries alphabetically, "All countries" last
-country_levels = c(sort(unique(conn_gain[group != "All countries", group])), "All countries")
-conn_gain[, group := factor(group, levels = country_levels)]
-conn_gain[, combined := group == "All countries"]
-conn_gain[, crop := factor(crop, levels = c("Spring barley", "Potato", "Red clover"))]
-
-# Plot 1: % of pairs connected
-p_pct = ggplot(conn_gain, aes(x = group, y = pct_connected, fill = combined)) +
-  geom_col(width = 0.7) +
-  geom_text(aes(label = sprintf("%.0f%%", pct_connected)),
-            vjust = -0.4, size = 2.8) +
-  scale_fill_manual(values = c("FALSE" = "#5B90C0", "TRUE" = "#E6842A"),
-                    guide = "none") +
-  scale_y_continuous(limits = c(0, 108), expand = c(0, 0)) +
-  facet_wrap(~crop) +
-  labs(x = NULL, y = "Variety pairs sharing \u22651 trial (%)") +
-  theme_light() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    strip.text = element_text(colour = "black"),
-    strip.background = element_rect(colour = "#f0f0f0", fill = "#f0f0f0"),
-    text = element_text(size = 12)
-  )
-
-# Plot 2: mean shared trials among connected pairs
-p_depth = ggplot(conn_gain, aes(x = group, y = mean_shared, fill = combined)) +
-  geom_col(width = 0.7) +
-  geom_text(aes(label = sprintf("%.1f", mean_shared)),
-            vjust = -0.4, size = 2.8) +
-  scale_fill_manual(values = c("FALSE" = "#5B90C0", "TRUE" = "#E6842A"),
-                    guide = "none") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
-  facet_wrap(~crop) +
-  labs(x = NULL, y = "Mean shared trials (connected pairs)") +
-  theme_light() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    strip.text = element_text(colour = "black"),
-    strip.background = element_rect(colour = "#f0f0f0", fill = "#f0f0f0"),
-    text = element_text(size = 12)
-  )
-
-pdf(paste0(figdir, "connectivity_gain.pdf"), width = 10, height = 5)
-print(p_pct)
-print(p_depth)
+pdf(paste0(figdir, "connectivity_global.pdf"), width = 9, height = 8)
+print(plot)
 dev.off()

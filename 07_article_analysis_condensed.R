@@ -384,3 +384,122 @@ plot = patchwork::wrap_plots(plots, nrow = 2, guides = "collect")
 pdf(paste0(figdir, "connectivity_global.pdf"), width = 9, height = 8)
 print(plot)
 dev.off()
+
+# ==============================================================================
+# Technical validation
+# ==============================================================================
+
+tmp = rbind(
+  data_b[, .(trial, year, country, variety, longitude, latitude, yield = dry_matter_yield)] |>
+    _[, let(tag = "Spring barley")],
+  data_p[, .(trial, year, country, variety, longitude, latitude, yield = yield)] |>
+    _[, let(tag = "Potato")],
+  data_c[, .(trial, year, country, variety, longitude, latitude, yield = dry_matter_yield)] |>
+    _[, let(tag = "Red clover")]
+)
+tmp[, let(
+  n = .N,
+  n_countries = length(unique(country))
+), by = c("variety", "tag")]
+
+pdf(paste0(figdir, "technical_validation.pdf"))
+crops = unique(tmp$tag)
+for (crop in crops) {
+  vars = tmp |>
+    _[n_countries > 1] |>
+    _[tag == crop] |>
+    _[, .(variety, n)] |>
+    unique() |>
+    _[order(n, decreasing = TRUE)] |>
+    _[1:10, variety]
+  for (var in vars) {
+    plot_data = tmp[variety == var, .(country, year, yield)]
+      #_[, let(yield_mean = mean(dry)), by = c("country", "year")]
+    plot = ggplot(plot_data) +
+      geom_boxplot(
+        mapping = aes(
+          x = year,
+          y = yield,
+          group = paste(country, year),
+          col = country
+        )
+      ) +
+      labs(title = paste0(crop, ", ", var))
+    print(plot)
+  }
+}
+dev.off()
+
+pdf(paste0(figdir, "technical_validation2.pdf"))
+crops = unique(tmp$tag)
+for (crop in crops) {
+  vars = tmp |>
+    _[n_countries > 1] |>
+    _[tag == crop] |>
+    _[, .(variety, n)] |>
+    unique() |>
+    _[order(n, decreasing = TRUE)] |>
+    _[1:10, variety]
+  for (var in vars) {
+    plot_data = tmp[variety == var, .(year, yield, longitude, latitude)]
+    plot_data = plot_data[!is.na(latitude)]
+    plot_data[, let(lat = cut(latitude, breaks = 5))]
+      #_[, let(yield_mean = mean(dry)), by = c("country", "year")]
+    plot = ggplot(plot_data) +
+      geom_boxplot(
+        mapping = aes(
+          x = year,
+          y = yield,
+          group = paste(lat, year),
+          col = lat
+        )
+      ) +
+      labs(title = paste0(crop, ", ", var))
+    print(plot)
+  }
+}
+dev.off()
+
+
+
+
+
+
+barley_var_counts = data_b[, table(variety)]
+vars = sort(barley_var_counts, decreasing = TRUE) |>
+  head(10) |>
+  names()
+
+tmp = data_b[variety == var, .(country, year, longitude, latitude, dry_matter_yield)]
+tmp[, let(yield_mean = mean(dry_matter_yield)), by = c("country", "year")]
+
+plot = ggplot(tmp) +
+  geom_boxplot(
+    mapping = aes(
+      x = year,
+      y = dry_matter_yield,
+      group = paste(country, year),
+      col = country
+      #fill = country
+    )
+  )# +
+  #geom_point(
+  #  mapping = aes(
+  #    x = year,
+  #    y = dry_matter_yield,
+  #    col = country
+  #  ),
+  #  position = position_jitter(width = .1, height = .1, seed = 1234)
+  #)
+
+pdf(paste0(figdir, "technical_validation.pdf"))
+print(plot)
+dev.off()
+
+tmp = rbind(
+  data_b[, .(trial, year, country, variety)][, let(tag = "Spring barley")],
+  data_p[, .(trial, year, country, variety)][, let(tag = "Potato")],
+  data_c[, .(trial, year, country, variety)][, let(tag = "Red clover")]
+)
+tmp[, let(n = .N), by = c("variety", "tag")]
+

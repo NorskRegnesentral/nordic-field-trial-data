@@ -87,7 +87,7 @@ plot = ggplot(tmp, aes(x = year, y = yield, group = interaction(year, country)))
   facet_wrap(~cultivar, ncol = 1, scales = "free") +
   labs(x = "Year", y = "Yield (hkg/ha)", fill = NULL) +
   scale_x_continuous(breaks = yrs) +
-  scale_fill_viridis_d(option = "C", begin = .25, end = 1)
+  scale_fill_viridis_d(option = "C", begin = .35, end = 1)
 
 pdf(paste0(figdir, "yield-year-country-overview.pdf"), height = 6, width = 10)
 print(plot)
